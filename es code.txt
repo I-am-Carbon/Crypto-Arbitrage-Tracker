@@ -1,0 +1,171 @@
+#include <SPI.h>
+#include <MFRC522.h>
+#include <Keypad.h>
+#include <Servo.h>
+
+#define SS_PIN 10
+#define RST_PIN 4      // changed from 9 → 4
+MFRC522 rfid(SS_PIN, RST_PIN);
+
+Servo lockServo;
+
+// ------------ LED PINS ------------
+#define LED_LOCK 8     // RED
+#define LED_UNLOCK 7   // YELLOW
+
+// ------------ USER DATA ------------
+struct User {
+  byte uid[7];
+  byte uidLength;
+  String pin;
+};
+
+User users[] = {
+  { {0x04, 0x60, 0x3B, 0xB2, 0xFB, 0x73, 0x81}, 7, "1234" },
+  { {0x04, 0x62, 0x5A, 0x3A, 0xCB, 0x11, 0x90}, 7, "5678" },
+};
+
+int totalUsers = 2;
+int activeUser = -1;
+
+// ------------ KEYPAD ------------
+const byte ROWS = 4;
+const byte COLS = 4;
+
+char keys[ROWS][COLS] = {
+  {'1','2','3','A'},
+  {'4','5','6','B'},
+  {'7','8','9','C'},
+  {'*','0','#','D'}
+};
+
+byte rowPins[ROWS] = {A2, A3, A4, A5};
+byte colPins[COLS] = {2, 3, 5, 6};
+
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+
+String enteredPIN = "";
+String serialCmd = "";
+bool doorLocked = true;
+
+// ------------ UID Compare ------------
+bool compareUID(byte *a, byte *b, byte len) {
+  for (byte i = 0; i < len; i++)
+    if (a[i] != b[i]) return false;
+  return true;
+}
+
+// ------------ SETUP ------------
+void setup() {
+  Serial.begin(9600);
+  SPI.begin();
+  rfid.PCD_Init();
+
+  lockServo.attach(A1);   // SERVO ON A1
+  lockServo.write(0);     // lock
+
+  pinMode(LED_LOCK, OUTPUT);
+  pinMode(LED_UNLOCK, OUTPUT);
+
+  digitalWrite(LED_LOCK, HIGH);   // locked at boot
+  digitalWrite(LED_UNLOCK, LOW);
+
+  Serial.println("RFID + PIN Door Lock Ready...");
+  Serial.println("Type LOCK to manually lock.");
+}
+
+// ------------ Lock Function ------------
+void lockDoor() {
+  lockServo.write(0);
+  doorLocked = true;
+  activeUser = -1;
+  enteredPIN = "";
+
+  digitalWrite(LED_LOCK, HIGH);
+  digitalWrite(LED_UNLOCK, LOW);
+
+  Serial.println("Door LOCKED. Waiting for RFID...");
+}
+
+// ------------ LOOP ------------
+void loop() {
+
+  // ----------- SERIAL COMMAND: LOCK ----------
+  if (Serial.available()) {
+    serialCmd = Serial.readStringUntil('\n');
+    serialCmd.trim();
+    serialCmd.toUpperCase();
+
+    if (serialCmd == "LOCK") {
+      lockDoor();
+    }
+    serialCmd = "";
+  }
+
+  // ----------- KEYPAD ----------
+  char key = keypad.getKey();
+  if (key) {
+    if (key == '#') {
+      if (activeUser != -1) {
+        if (enteredPIN == users[activeUser].pin) {
+          Serial.println("\nPIN Correct → UNLOCKED");
+          lockServo.write(180);
+          doorLocked = false;
+          enteredPIN = "";
+
+          digitalWrite(LED_LOCK, LOW);
+          digitalWrite(LED_UNLOCK, HIGH);
+
+        } else {
+          Serial.println("\nWrong PIN. Try again:");
+          enteredPIN = "";
+        }
+      } else {
+        Serial.println("\nScan your RFID first.");
+        enteredPIN = "";
+      }
+    }
+    else if (key == '*') {
+      enteredPIN = "";
+      Serial.println("\nPIN cleared.");
+    }
+    else {
+      enteredPIN += key;
+      Serial.print("*");
+    }
+  }
+
+  // ----------- RFID ----------
+  if (doorLocked &&
+      rfid.PICC_IsNewCardPresent() &&
+      rfid.PICC_ReadCardSerial()) {
+
+    Serial.print("\nDetected UID: ");
+    for (byte i = 0; i < rfid.uid.size; i++) {
+      Serial.print(rfid.uid.uidByte[i], HEX);
+      Serial.print(" ");
+    }
+    Serial.println();
+
+    activeUser = -1;
+
+    for (int i = 0; i < totalUsers; i++) {
+      if (users[i].uidLength == rfid.uid.size &&
+          compareUID(rfid.uid.uidByte, users[i].uid, rfid.uid.size)) {
+
+        activeUser = i;
+        enteredPIN = "";
+        Serial.print("RFID MATCHED → Enter PIN for User ");
+        Serial.println(i);
+        break;
+      }
+    }
+
+    if (activeUser == -1) {
+      Serial.println("Unauthorized RFID. Access denied.");
+    }
+
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+  }
+}
